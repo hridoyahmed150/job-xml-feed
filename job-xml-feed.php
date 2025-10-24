@@ -81,17 +81,11 @@ class JobXMLFeedGenerator
         $post_type = isset($settings['post_type']) ? $settings['post_type'] : 'job';
         $max_jobs = isset($settings['max_jobs']) ? intval($settings['max_jobs']) : 1000;
 
-        // Get jobs
+        // Get jobs - first check all published posts
         $args = array(
             'post_type' => $post_type,
             'post_status' => 'publish',
-            'posts_per_page' => $max_jobs,
-            'meta_query' => array(
-                array(
-                    'key' => '_job_country',
-                    'compare' => 'EXISTS'
-                )
-            )
+            'posts_per_page' => $max_jobs
         );
 
         $jobs = get_posts($args);
@@ -99,10 +93,29 @@ class JobXMLFeedGenerator
         // Create XML structure
         $xml = new SimpleXMLElement('<?xml version="1.0" encoding="UTF-8"?><jobs></jobs>');
 
+        // Add debug info if no jobs found
+        if (empty($jobs)) {
+            $debug = $xml->addChild('debug');
+            $debug->addChild('message', 'No jobs found');
+            $debug->addChild('post_type', $post_type);
+            $debug->addChild('total_posts', wp_count_posts($post_type)->publish);
+            return $xml->asXML();
+        }
+
+        $valid_jobs = 0;
         foreach ($jobs as $job) {
             if ($this->validate_job_data($job)) {
                 $this->add_job_to_xml($xml, $job);
+                $valid_jobs++;
             }
+        }
+
+        // Add debug info if no valid jobs
+        if ($valid_jobs == 0) {
+            $debug = $xml->addChild('debug');
+            $debug->addChild('message', 'No valid jobs found - missing required meta fields');
+            $debug->addChild('total_jobs', count($jobs));
+            $debug->addChild('required_fields', 'country, city, state, company');
         }
 
         return $xml->asXML();
@@ -110,6 +123,17 @@ class JobXMLFeedGenerator
 
     private function validate_job_data($job)
     {
+        // Check for your existing meta field structure first
+        $country = get_post_meta($job->ID, '_job_country_code', true);
+        $city = get_post_meta($job->ID, '_job_city', true);
+        $region = get_post_meta($job->ID, '_job_region_code', true);
+
+        // If your existing fields exist, use them
+        if (!empty($country) && !empty($city) && !empty($region)) {
+            return true;
+        }
+
+        // Fallback to standard fields
         $required_fields = array(
             '_job_country',
             '_job_city',
@@ -134,19 +158,48 @@ class JobXMLFeedGenerator
         $job_node->addChild('referenceID', $this->sanitize_text($job->ID));
         $job_node->addChild('title', $this->sanitize_text($job->post_title));
 
-        // Description with CDATA
-        $description = $job_node->addChild('description');
-        $content = apply_filters('the_content', $job->post_content);
-        $content = $this->clean_description($content);
-        $description->addCData($content);
+        // Description with CDATA - use job description from your data
+        $job_description = get_post_meta($job->ID, '_job_ad_job_description_text', true);
+        if (empty($job_description)) {
+            $job_description = apply_filters('the_content', $job->post_content);
+        }
+        $content = $this->clean_description($job_description);
 
-        // Location fields
-        $job_node->addChild('country', $this->sanitize_text(get_post_meta($job->ID, '_job_country', true)));
-        $job_node->addChild('city', $this->sanitize_text(get_post_meta($job->ID, '_job_city', true)));
-        $job_node->addChild('state', $this->sanitize_text(get_post_meta($job->ID, '_job_state', true)));
+        // Use DOMDocument for CDATA support
+        $dom = dom_import_simplexml($job_node);
+        $description_element = $dom->ownerDocument->createElement('description');
+        $cdata = $dom->ownerDocument->createCDATASection($content);
+        $description_element->appendChild($cdata);
+        $dom->appendChild($description_element);
 
-        // Postal code (with fallback)
-        $postal_code = get_post_meta($job->ID, '_job_postal_code', true);
+        // Location fields - use your existing meta fields
+        $country = get_post_meta($job->ID, '_job_country_code', true);
+        if (empty($country)) {
+            $country = get_post_meta($job->ID, '_job_country', true);
+        }
+        $job_node->addChild('country', $this->sanitize_text($country));
+
+        $city = get_post_meta($job->ID, '_job_city', true);
+        $job_node->addChild('city', $this->sanitize_text($city));
+
+        $state = get_post_meta($job->ID, '_job_region_code', true);
+        if (empty($state)) {
+            $state = get_post_meta($job->ID, '_job_state', true);
+        }
+        $job_node->addChild('state', $this->sanitize_text($state));
+
+        // Postal code from location_full
+        $location_full = get_post_meta($job->ID, '_job_location_full', true);
+        $postal_code = '';
+        if (!empty($location_full) && is_string($location_full)) {
+            $location_data = json_decode($location_full, true);
+            if (isset($location_data['postalCode'])) {
+                $postal_code = $location_data['postalCode'];
+            }
+        }
+        if (empty($postal_code)) {
+            $postal_code = get_post_meta($job->ID, '_job_postal_code', true);
+        }
         if (empty($postal_code)) {
             $postal_code = get_post_meta($job->ID, '_job_zip', true);
         }
@@ -160,8 +213,12 @@ class JobXMLFeedGenerator
         }
         $job_node->addChild('validThrough', $valid_through);
 
-        // Company and URL
-        $job_node->addChild('hiringOrganization', $this->sanitize_text(get_post_meta($job->ID, '_job_company', true)));
+        // Company - use from your data or fallback
+        $company = get_post_meta($job->ID, '_job_company', true);
+        if (empty($company)) {
+            $company = 'Intuitive Health'; // Default company name
+        }
+        $job_node->addChild('hiringOrganization', $this->sanitize_text($company));
         $job_node->addChild('url', get_permalink($job->ID));
 
         // Optional but recommended fields
@@ -175,9 +232,21 @@ class JobXMLFeedGenerator
             $job_node->addChild('category', $this->sanitize_text($category));
         }
 
-        $is_remote = get_post_meta($job->ID, '_job_is_remote', true);
-        if (!empty($is_remote)) {
-            $job_node->addChild('isRemote', $is_remote ? 'true' : 'false');
+        // Remote work - check your existing field
+        $is_remote = get_post_meta($job->ID, '_job_remote', true);
+        if ($is_remote === 'ONSITE') {
+            $job_node->addChild('isRemote', 'false');
+        } elseif ($is_remote === 'REMOTE') {
+            $job_node->addChild('isRemote', 'true');
+        } else {
+            // Check location_full for remote info
+            $location_full = get_post_meta($job->ID, '_job_location_full', true);
+            if (!empty($location_full) && is_string($location_full)) {
+                $location_data = json_decode($location_full, true);
+                if (isset($location_data['remote'])) {
+                    $job_node->addChild('isRemote', $location_data['remote'] ? 'true' : 'false');
+                }
+            }
         }
     }
 
@@ -265,8 +334,28 @@ class JobXMLFeedGenerator
             <p><strong>Feed URL:</strong> <code><?php echo home_url('/jobs-feed.xml'); ?></code></p>
             <p><strong>Total Jobs:</strong> <?php echo $this->get_total_jobs(); ?></p>
 
-            <h2>Required Meta Fields</h2>
-            <p>Make sure your job posts have these meta fields:</p>
+            <?php if (isset($_GET['test_job_created'])): ?>
+                <div class="notice notice-success">
+                    <p>Test job created successfully! Check your feed now.</p>
+                </div>
+            <?php endif; ?>
+
+            <p><a href="<?php echo admin_url('options-general.php?page=job-xml-feed&create_test_job=1'); ?>"
+                    class="button button-secondary">Create Test Job</a></p>
+
+            <h2>Your Existing Meta Fields</h2>
+            <p>Plugin automatically detects and uses these fields from your database:</p>
+            <ul>
+                <li><code>_job_country_code</code> - Country code (e.g., "us")</li>
+                <li><code>_job_city</code> - City name</li>
+                <li><code>_job_region_code</code> - State code (e.g., "TX")</li>
+                <li><code>_job_location_full</code> - JSON location data with postal code</li>
+                <li><code>_job_ad_job_description_text</code> - Job description</li>
+                <li><code>_job_remote</code> - Remote work status (ONSITE/REMOTE)</li>
+            </ul>
+
+            <h2>Fallback Meta Fields</h2>
+            <p>If above fields are not available, plugin will use:</p>
             <ul>
                 <li><code>_job_country</code> - Two-letter ISO country code</li>
                 <li><code>_job_city</code> - City name</li>
@@ -325,7 +414,42 @@ class JobXMLFeedGenerator
     {
         flush_rewrite_rules();
     }
+
+    // Test function to create sample job
+    public function create_test_job()
+    {
+        if (isset($_GET['create_test_job']) && current_user_can('manage_options')) {
+            $job_data = array(
+                'post_title' => 'Test Software Developer Job',
+                'post_content' => '<p>This is a test job posting for XML feed testing.</p><p><strong>Requirements:</strong></p><ul><li>PHP experience</li><li>WordPress knowledge</li></ul>',
+                'post_status' => 'publish',
+                'post_type' => 'job',
+                'post_author' => 1
+            );
+
+            $job_id = wp_insert_post($job_data);
+
+            if ($job_id && !is_wp_error($job_id)) {
+                // Add required meta fields
+                update_post_meta($job_id, '_job_country', 'US');
+                update_post_meta($job_id, '_job_city', 'New York');
+                update_post_meta($job_id, '_job_state', 'NY');
+                update_post_meta($job_id, '_job_company', 'Test Company Inc.');
+                update_post_meta($job_id, '_job_postal_code', '10001');
+                update_post_meta($job_id, '_job_type', 'Full-time');
+                update_post_meta($job_id, '_job_category', 'Technology');
+                update_post_meta($job_id, '_job_is_remote', false);
+                update_post_meta($job_id, '_job_expire_date', date('Y-m-d', strtotime('+30 days')));
+
+                wp_redirect(admin_url('options-general.php?page=job-xml-feed&test_job_created=1'));
+                exit;
+            }
+        }
+    }
 }
 
 // Initialize the plugin
-new JobXMLFeedGenerator();
+$job_xml_feed = new JobXMLFeedGenerator();
+
+// Add test job creation hook
+add_action('admin_init', array($job_xml_feed, 'create_test_job'));
