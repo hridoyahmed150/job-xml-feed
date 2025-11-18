@@ -82,18 +82,33 @@ class JobXMLFeedGenerator
         $post_type = isset($settings['post_type']) ? $settings['post_type'] : 'job';
         $max_jobs = isset($settings['max_jobs']) ? intval($settings['max_jobs']) : 1000;
 
-        // Get jobs
+        // Get jobs - only PUBLIC posting status
         $args = array(
             'post_type' => $post_type,
             'post_status' => 'publish',
-            'posts_per_page' => $max_jobs
+            'posts_per_page' => $max_jobs,
+            'meta_query' => array(
+                array(
+                    'key' => '_job_posting_status',
+                    'value' => 'PUBLIC',
+                    'compare' => '='
+                )
+            )
         );
 
         $jobs = get_posts($args);
 
+        header('Content-Type: application/rss+xml; charset=UTF-8');
+
         // Start building XML manually for better control
         $xml_content = '<?xml version="1.0" encoding="UTF-8"?>' . "\n";
-        $xml_content .= '<jobs>' . "\n";
+        $xml_content .= '<rss version="2.0">' . "\n";
+        $xml_content .= '  <channel>' . "\n";
+        $xml_content .= '    <title>' . esc_html(get_bloginfo('name')) . ' - Job Feed</title>' . "\n";
+        $xml_content .= '    <link>' . esc_url(home_url()) . '</link>' . "\n";
+        $xml_content .= '    <description>' . esc_html(get_bloginfo('description')) . '</description>' . "\n";
+        $xml_content .= '    <language>' . esc_html(get_bloginfo('language')) . '</language>' . "\n";
+        $xml_content .= '    <jobs>' . "\n";
 
         if (empty($jobs)) {
             $xml_content .= '  <debug>' . "\n";
@@ -119,7 +134,9 @@ class JobXMLFeedGenerator
             }
         }
 
-        $xml_content .= '</jobs>';
+        $xml_content .= '    </jobs>' . "\n";
+        $xml_content .= '  </channel>' . "\n";
+        $xml_content .= '</rss>';
         return $xml_content;
     }
 
@@ -256,50 +273,50 @@ class JobXMLFeedGenerator
         }
 
         // Build XML manually
-        $xml = '  <job>' . "\n";
+        $xml = '      <job>' . "\n";
         if (!empty($reference_id)) {
-            $xml .= '    <referenceID>' . esc_html($reference_id) . '</referenceID>' . "\n";
+            $xml .= '       <referenceID>' . esc_html($reference_id) . '</referenceID>' . "\n";
         }
         if (!empty($job->post_title)) {
-            $xml .= '    <title>' . esc_html($job->post_title) . '</title>' . "\n";
+            $xml .= '       <title>' . esc_html($job->post_title) . '</title>' . "\n";
         }
 
         if (!empty($content)) {
-            $xml .= '    <description><![CDATA[' . $content . ']]></description>' . "\n";
+            $xml .= '       <description><![CDATA[' . $content . ']]></description>' . "\n";
         }
         if (!empty($country)) {
-            $xml .= '    <country>' . esc_html($country) . '</country>' . "\n";
+            $xml .= '       <country>' . esc_html($country) . '</country>' . "\n";
         }
         if (!empty($city)) {
-            $xml .= '    <city>' . esc_html($city) . '</city>' . "\n";
+            $xml .= '       <city>' . esc_html($city) . '</city>' . "\n";
         }
         if (!empty($state)) {
-            $xml .= '    <state>' . esc_html($state) . '</state>' . "\n";
+            $xml .= '       <state>' . esc_html($state) . '</state>' . "\n";
         }
         if (!empty($postal_code)) {
-            $xml .= '    <postalCode>' . esc_html($postal_code) . '</postalCode>' . "\n";
+            $xml .= '       <postalCode>' . esc_html($postal_code) . '</postalCode>' . "\n";
         }
         if (!empty($date_posted)) {
-            $xml .= '    <datePosted>' . esc_html($date_posted) . '</datePosted>' . "\n";
+            $xml .= '       <datePosted>' . esc_html($date_posted) . '</datePosted>' . "\n";
         }
         if (!empty($valid_through)) {
-            $xml .= '    <validThrough>' . esc_html($valid_through) . '</validThrough>' . "\n";
+            $xml .= '       <validThrough>' . esc_html($valid_through) . '</validThrough>' . "\n";
         }
         if (!empty($company)) {
-            $xml .= '    <hiringOrganization>' . esc_html($company) . '</hiringOrganization>' . "\n";
+            $xml .= '       <hiringOrganization>' . esc_html($company) . '</hiringOrganization>' . "\n";
         }
         if (!empty($job_web_url)) {
-            $xml .= '    <url>' . esc_html($job_web_url) . '</url>' . "\n";
+            $xml .= '       <url>' . esc_html($job_web_url) . '</url>' . "\n";
         }
         if (!empty($job_type)) {
-            $xml .= '    <jobType>' . esc_html($job_type) . '</jobType>' . "\n";
+            $xml .= '       <jobType>' . esc_html($job_type) . '</jobType>' . "\n";
         }
 
         if (!empty($remote_value)) {
-            $xml .= '    <isRemote>' . $remote_value . '</isRemote>' . "\n";
+            $xml .= '       <isRemote>' . $remote_value . '</isRemote>' . "\n";
         }
 
-        $xml .= '  </job>' . "\n";
+        $xml .= '     </job>' . "\n";
 
         return $xml;
     }
@@ -426,7 +443,14 @@ class JobXMLFeedGenerator
             'post_type' => $post_type,
             'post_status' => 'publish',
             'posts_per_page' => -1,
-            'fields' => 'ids'
+            'fields' => 'ids',
+            'meta_query' => array(
+                array(
+                    'key' => '_job_posting_status',
+                    'value' => 'PUBLIC',
+                    'compare' => '='
+                )
+            )
         );
 
         $jobs = get_posts($args);
