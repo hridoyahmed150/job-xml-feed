@@ -448,6 +448,8 @@ class JobXMLFeedGenerator
         // Clean up extra whitespace
         $job_title = preg_replace('/\s+/', ' ', $job_title);
         $job_title = trim($job_title);
+        // Remove trailing dash
+        $job_title = rtrim($job_title, ' -');
 
         // Description - use full, untrimmed description (minimum 600 characters)
         $job_description = get_post_meta($job->ID, '_job_ad_job_description_text', true);
@@ -476,6 +478,10 @@ class JobXMLFeedGenerator
         $country = get_post_meta($job->ID, '_job_country_code', true);
         if (empty($country)) {
             $country = get_post_meta($job->ID, '_job_country', true);
+        }
+        // Convert country to uppercase ISO format (US instead of us)
+        if (!empty($country)) {
+            $country = strtoupper($country);
         }
 
         $city = get_post_meta($job->ID, '_job_city', true);
