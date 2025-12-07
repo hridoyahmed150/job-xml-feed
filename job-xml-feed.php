@@ -34,8 +34,11 @@ class JobXMLFeedGenerator
 
     public function init()
     {
-        // Add rewrite rule for XML feed
-        add_rewrite_rule('^jobs-feed', 'index.php?job_xml_feed=1', 'top');
+        // Add rewrite rule for ZipRecruiter XML feed
+        add_rewrite_rule('^ziprecruiter', 'index.php?job_xml_feed=ziprecruiter', 'top');
+
+        // Add rewrite rule for Indeed XML feed
+        add_rewrite_rule('^indeed', 'index.php?job_xml_feed=indeed', 'top');
 
         // Flush rewrite rules if needed
         if (get_option('job_xml_feed_flush_rewrite_rules')) {
@@ -52,8 +55,14 @@ class JobXMLFeedGenerator
 
     public function handle_feed_request()
     {
-        if (get_query_var('job_xml_feed')) {
-            $this->generate_xml_feed();
+        $feed_type = get_query_var('job_xml_feed');
+        if ($feed_type) {
+            if ($feed_type === 'indeed') {
+                $this->generate_indeed_xml_feed();
+            } else {
+                // Default to ZipRecruiter format (backward compatible)
+                $this->generate_xml_feed();
+            }
             exit;
         }
     }
@@ -340,6 +349,209 @@ class JobXMLFeedGenerator
         return $content;
     }
 
+    private function clean_description_for_indeed($content)
+    {
+        // Remove phone numbers and external URLs but keep full description
+        $content = preg_replace('/\b\d{3}[-.]?\d{3}[-.]?\d{4}\b/', '', $content);
+        $content = preg_replace('/https?:\/\/[^\s<>"]+/', '', $content);
+
+        // Clean up excessive whitespace but preserve structure
+        $content = preg_replace('/[ \t]+/', ' ', $content);
+        $content = preg_replace('/\n\s*\n\s*\n+/', "\n\n", $content);
+
+        // Don't trim - keep full description
+        return $content;
+    }
+
+    public function generate_indeed_xml_feed()
+    {
+        // Set proper headers
+        header('Content-Type: application/xml; charset=utf-8');
+        header('Cache-Control: no-cache, must-revalidate');
+        header('Expires: Sat, 26 Jul 1997 05:00:00 GMT');
+
+        try {
+            $xml_content = $this->build_indeed_xml_feed();
+            echo $xml_content;
+            exit;
+        } catch (Exception $e) {
+            error_log('Indeed Job XML Feed Error: ' . $e->getMessage());
+            $this->output_error_xml();
+        }
+    }
+
+    private function build_indeed_xml_feed()
+    {
+        // Get plugin settings
+        $settings = get_option('job_xml_feed_settings', array());
+        $post_type = isset($settings['post_type']) ? $settings['post_type'] : 'job';
+        $max_jobs = isset($settings['max_jobs']) ? intval($settings['max_jobs']) : 1000;
+
+        // Get jobs - only PUBLIC posting status (same data source as ZipRecruiter)
+        $args = array(
+            'post_type' => $post_type,
+            'post_status' => 'publish',
+            'posts_per_page' => $max_jobs,
+            'meta_query' => array(
+                array(
+                    'key' => '_job_posting_status',
+                    'value' => 'PUBLIC',
+                    'compare' => '='
+                )
+            )
+        );
+
+        $jobs = get_posts($args);
+
+        // Start building XML in Indeed format
+        $xml_content = '<?xml version="1.0" encoding="UTF-8"?>' . "\n";
+        $xml_content .= '<source>' . "\n";
+
+        if (empty($jobs)) {
+            $xml_content .= '  <message>No jobs found</message>' . "\n";
+        } else {
+            $valid_jobs = 0;
+            foreach ($jobs as $job) {
+                if ($this->validate_job_data($job)) {
+                    $xml_content .= $this->build_indeed_job_xml($job);
+                    $valid_jobs++;
+                }
+            }
+
+            if ($valid_jobs == 0) {
+                $xml_content .= '  <message>No valid jobs found - missing required meta fields</message>' . "\n";
+            }
+        }
+
+        $xml_content .= '</source>';
+        return $xml_content;
+    }
+
+    private function build_indeed_job_xml($job)
+    {
+        // Get job data (same source as ZipRecruiter feed)
+        $reference_id = get_post_meta($job->ID, '_job_ref_number', true);
+        if (empty($reference_id)) {
+            $reference_id = $job->ID; // Fallback to post ID
+        }
+
+        // Job title - clean, only position name (remove "Final Test", salary, location)
+        $job_title = $job->post_title;
+        // Remove "Final Test" and similar test indicators
+        $job_title = preg_replace('/\b(final\s+test|test\s+job|test\s+posting)\b/i', '', $job_title);
+        // Remove common salary patterns
+        $job_title = preg_replace('/\$[\d,]+(\s*-\s*\$[\d,]+)?(\s*\/\s*(year|hour|month))?/i', '', $job_title);
+        // Remove location patterns like "in City, State", "at Location", "near Location"
+        $job_title = preg_replace('/\s*(in|at|near)\s+[A-Z][a-z]+(\s*,\s*[A-Z]{2})?/i', '', $job_title);
+        // Remove parentheses with location/salary info
+        $job_title = preg_replace('/\s*\([^)]*(?:salary|location|city|state|country)[^)]*\)/i', '', $job_title);
+        // Clean up extra whitespace
+        $job_title = preg_replace('/\s+/', ' ', $job_title);
+        $job_title = trim($job_title);
+
+        // Description - use full, untrimmed description (minimum 600 characters)
+        $job_description = get_post_meta($job->ID, '_job_ad_job_description_text', true);
+        if (empty($job_description)) {
+            $job_description = apply_filters('the_content', $job->post_content);
+        }
+        // Clean phone numbers and URLs but keep full description
+        $content = $this->clean_description_for_indeed($job_description);
+        // Ensure minimum 600 characters
+        if (strlen($content) < 600 && !empty($job->post_content)) {
+            // If cleaned description is too short, try using post content
+            $fallback_content = apply_filters('the_content', $job->post_content);
+            $fallback_content = $this->clean_description_for_indeed($fallback_content);
+            if (strlen($fallback_content) >= 600) {
+                $content = $fallback_content;
+            }
+        }
+
+        // Company name
+        $company = get_post_meta($job->ID, '_job_property_brands_label', true);
+        if (empty($company)) {
+            $company = 'Intuitive Health'; // Default company name
+        }
+
+        // Location fields - separate tags for Indeed
+        $country = get_post_meta($job->ID, '_job_country_code', true);
+        if (empty($country)) {
+            $country = get_post_meta($job->ID, '_job_country', true);
+        }
+
+        $city = get_post_meta($job->ID, '_job_city', true);
+
+        $state = get_post_meta($job->ID, '_job_region_code', true);
+        if (empty($state)) {
+            $state = get_post_meta($job->ID, '_job_state', true);
+        }
+
+        // Dates
+        $created_on = get_post_meta($job->ID, '_job_created_on', true);
+        $date_posted = '';
+        if (!empty($created_on)) {
+            $date_posted = date('Y-m-d', strtotime($created_on));
+        } else {
+            // Fallback to post date
+            $date_posted = date('Y-m-d', strtotime($job->post_date));
+        }
+
+        $expiration_date = get_post_meta($job->ID, '_job_expiration_date', true);
+        $exp_date = '';
+        if (!empty($expiration_date)) {
+            $exp_date = date('Y-m-d', strtotime($expiration_date));
+        } else {
+            $exp_date = get_post_meta($job->ID, '_job_expire_date', true);
+        }
+
+        // Build XML in Indeed format
+        $xml = '  <job>' . "\n";
+
+        // Title (clean, only position name)
+        if (!empty($job_title)) {
+            $xml .= '    <title><![CDATA[' . $job_title . ']]></title>' . "\n";
+        }
+
+        // Description (full, untrimmed, minimum 600 characters)
+        if (!empty($content)) {
+            $xml .= '    <description><![CDATA[' . $content . ']]></description>' . "\n";
+        }
+
+        // Reference number / unique job ID
+        if (!empty($reference_id)) {
+            $xml .= '    <referencenumber><![CDATA[' . esc_html($reference_id) . ']]></referencenumber>' . "\n";
+        }
+
+        // Company name
+        if (!empty($company)) {
+            $xml .= '    <company><![CDATA[' . esc_html($company) . ']]></company>' . "\n";
+        }
+
+        // Location - structured tags
+        if (!empty($city)) {
+            $xml .= '    <city><![CDATA[' . esc_html($city) . ']]></city>' . "\n";
+        }
+        if (!empty($state)) {
+            $xml .= '    <state><![CDATA[' . esc_html($state) . ']]></state>' . "\n";
+        }
+        if (!empty($country)) {
+            $xml .= '    <country><![CDATA[' . esc_html($country) . ']]></country>' . "\n";
+        }
+
+        // Posting date
+        if (!empty($date_posted)) {
+            $xml .= '    <date><![CDATA[' . esc_html($date_posted) . ']]></date>' . "\n";
+        }
+
+        // Expiration date (if available)
+        if (!empty($exp_date)) {
+            $xml .= '    <expiration_date><![CDATA[' . esc_html($exp_date) . ']]></expiration_date>' . "\n";
+        }
+
+        $xml .= '  </job>' . "\n";
+
+        return $xml;
+    }
+
     private function output_error_xml()
     {
         $xml = new SimpleXMLElement('<?xml version="1.0" encoding="UTF-8"?><jobs></jobs>');
@@ -403,7 +615,8 @@ class JobXMLFeedGenerator
             </form>
 
             <h2>Feed Information</h2>
-            <p><strong>Feed URL:</strong> <code><?php echo home_url('/jobs-feed'); ?></code></p>
+            <p><strong>ZipRecruiter Feed URL:</strong> <code><?php echo home_url('/ziprecruiter'); ?></code></p>
+            <p><strong>Indeed Feed URL:</strong> <code><?php echo home_url('/indeed'); ?></code></p>
             <p><strong>Total Jobs:</strong> <?php echo $this->get_total_jobs(); ?></p>
 
             <h2>Your Existing Meta Fields</h2>
