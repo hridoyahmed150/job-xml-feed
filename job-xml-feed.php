@@ -34,8 +34,11 @@ class JobXMLFeedGenerator
 
     public function init()
     {
-        // Add rewrite rule for XML feed
-        add_rewrite_rule('^jobs-feed', 'index.php?job_xml_feed=1', 'top');
+        // Add rewrite rule for ZipRecruiter XML feed
+        add_rewrite_rule('^ziprecruiter', 'index.php?job_xml_feed=ziprecruiter', 'top');
+
+        // Add rewrite rule for Indeed XML feed
+        add_rewrite_rule('^indeed', 'index.php?job_xml_feed=indeed', 'top');
 
         // Flush rewrite rules if needed
         if (get_option('job_xml_feed_flush_rewrite_rules')) {
@@ -52,8 +55,14 @@ class JobXMLFeedGenerator
 
     public function handle_feed_request()
     {
-        if (get_query_var('job_xml_feed')) {
-            $this->generate_xml_feed();
+        $feed_type = get_query_var('job_xml_feed');
+        if ($feed_type) {
+            if ($feed_type === 'indeed') {
+                $this->generate_indeed_xml_feed();
+            } else {
+                // Default to ZipRecruiter format
+                $this->generate_xml_feed();
+            }
             exit;
         }
     }
@@ -340,6 +349,181 @@ class JobXMLFeedGenerator
         return $content;
     }
 
+    public function generate_indeed_xml_feed()
+    {
+        // Clear any previous output
+        if (ob_get_level()) {
+            ob_clean();
+        }
+
+        // Set proper headers (same as ZipRecruiter feed)
+        header('Content-Type: application/rss+xml; charset=UTF-8');
+        header('Cache-Control: no-cache, must-revalidate');
+        header('Expires: Sat, 26 Jul 1997 05:00:00 GMT');
+
+        try {
+            $xml_content = $this->build_indeed_xml_feed();
+            echo $xml_content;
+            exit;
+        } catch (Exception $e) {
+            error_log('Indeed Job XML Feed Error: ' . $e->getMessage());
+            $this->output_error_xml();
+        }
+    }
+
+    private function build_indeed_xml_feed()
+    {
+        // Get plugin settings
+        $settings = get_option('job_xml_feed_settings', array());
+        $post_type = isset($settings['post_type']) ? $settings['post_type'] : 'job';
+        $max_jobs = isset($settings['max_jobs']) ? intval($settings['max_jobs']) : 1000;
+
+        // Get jobs - only PUBLIC posting status (same data source)
+        $args = array(
+            'post_type' => $post_type,
+            'post_status' => 'publish',
+            'posts_per_page' => $max_jobs,
+            'meta_query' => array(
+                array(
+                    'key' => '_job_posting_status',
+                    'value' => 'PUBLIC',
+                    'compare' => '='
+                )
+            )
+        );
+
+        $jobs = get_posts($args);
+
+        // Start building XML in Indeed format
+        $xml_content = '<?xml version="1.0" encoding="UTF-8"?>' . "\n";
+        $xml_content .= '<source>' . "\n";
+
+        if (empty($jobs)) {
+            $xml_content .= '  <message>No jobs found</message>' . "\n";
+        } else {
+            $valid_jobs = 0;
+            foreach ($jobs as $job) {
+                if ($this->validate_job_data($job)) {
+
+                    $xml_content .= $this->build_indeed_job_xml($job);
+                    $valid_jobs++;
+                }
+            }
+
+            if ($valid_jobs == 0) {
+                $xml_content .= '  <message>No valid jobs found - missing required meta fields</message>' . "\n";
+            }
+        }
+
+        $xml_content .= '</source>';
+        return $xml_content;
+    }
+
+    private function build_indeed_job_xml($job)
+    {
+        // Same data source as ZipRecruiter feed
+        $reference_id = get_post_meta($job->ID, '_job_ref_number', true);
+        if (empty($reference_id)) {
+            $reference_id = $job->ID;
+        }
+
+        // Title - remove trailing dash and extra text like "- Final Test" (Indeed rule)
+        $job_title = $job->post_title;
+        // Remove patterns like "- Final Test", "- Test", etc.
+        $job_title = preg_replace('/\s*-\s*(Final\s+Test|Test|Test\s+Job|Test\s+Posting)\s*$/i', '', $job_title);
+        $job_title = rtrim($job_title, ' -');
+        $job_title = trim($job_title);
+
+        // Description - same as ZipRecruiter
+        $job_description = get_post_meta($job->ID, '_job_ad_job_description_text', true);
+        if (empty($job_description)) {
+            $job_description = apply_filters('the_content', $job->post_content);
+        }
+        $content = $this->clean_description($job_description);
+
+        // Company - same as ZipRecruiter
+        $company = get_post_meta($job->ID, '_job_property_brands_label', true);
+        if (empty($company)) {
+            $company = 'Intuitive Health';
+        }
+
+        // Location fields - same as ZipRecruiter
+        $country = get_post_meta($job->ID, '_job_country_code', true);
+        if (empty($country)) {
+            $country = get_post_meta($job->ID, '_job_country', true);
+        }
+        // Convert country to uppercase (Indeed rule)
+        if (!empty($country)) {
+            $country = strtoupper($country);
+        }
+
+        $city = get_post_meta($job->ID, '_job_city', true);
+        $state = get_post_meta($job->ID, '_job_region_code', true);
+        if (empty($state)) {
+            $state = get_post_meta($job->ID, '_job_state', true);
+        }
+
+        // Dates - same as ZipRecruiter
+        $created_on = get_post_meta($job->ID, '_job_created_on', true);
+        $date_posted = '';
+        if (!empty($created_on)) {
+            $date_posted = date('Y-m-d', strtotime($created_on));
+        } else {
+            $date_posted = date('Y-m-d', strtotime($job->post_date));
+        }
+
+        $expiration_date = get_post_meta($job->ID, '_job_expiration_date', true);
+        $exp_date = '';
+        if (!empty($expiration_date)) {
+            $exp_date = date('Y-m-d', strtotime($expiration_date));
+        } else {
+            $exp_date = get_post_meta($job->ID, '_job_expire_date', true);
+        }
+
+        // Build XML in Indeed format
+        $xml = '  <job>' . "\n";
+
+        if (!empty($job_title)) {
+            $xml .= '    <title><![CDATA[' . $job_title . ']]></title>' . "\n";
+        }
+
+        if (!empty($content)) {
+            $xml .= '    <description><![CDATA[' . $content . ']]></description>' . "\n";
+        }
+
+        if (!empty($reference_id)) {
+            $xml .= '    <referencenumber><![CDATA[' . esc_html($reference_id) . ']]></referencenumber>' . "\n";
+        }
+
+        if (!empty($company)) {
+            $xml .= '    <company><![CDATA[' . esc_html($company) . ']]></company>' . "\n";
+        }
+
+        if (!empty($city)) {
+            $xml .= '    <city><![CDATA[' . esc_html($city) . ']]></city>' . "\n";
+        }
+
+        if (!empty($state)) {
+            $xml .= '    <state><![CDATA[' . esc_html($state) . ']]></state>' . "\n";
+        }
+
+        if (!empty($country)) {
+            $xml .= '    <country><![CDATA[' . esc_html($country) . ']]></country>' . "\n";
+        }
+
+        if (!empty($date_posted)) {
+            $xml .= '    <date><![CDATA[' . esc_html($date_posted) . ']]></date>' . "\n";
+        }
+
+        if (!empty($exp_date)) {
+            $xml .= '    <expiration_date><![CDATA[' . esc_html($exp_date) . ']]></expiration_date>' . "\n";
+        }
+
+        $xml .= '  </job>' . "\n";
+
+        return $xml;
+    }
+
     private function output_error_xml()
     {
         $xml = new SimpleXMLElement('<?xml version="1.0" encoding="UTF-8"?><jobs></jobs>');
@@ -403,7 +587,8 @@ class JobXMLFeedGenerator
             </form>
 
             <h2>Feed Information</h2>
-            <p><strong>Feed URL:</strong> <code><?php echo home_url('/jobs-feed'); ?></code></p>
+            <p><strong>ZipRecruiter Feed URL:</strong> <code><?php echo home_url('/ziprecruiter'); ?></code></p>
+            <p><strong>Indeed Feed URL:</strong> <code><?php echo home_url('/indeed'); ?></code></p>
             <p><strong>Total Jobs:</strong> <?php echo $this->get_total_jobs(); ?></p>
 
             <h2>Your Existing Meta Fields</h2>
